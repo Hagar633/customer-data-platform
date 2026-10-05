@@ -18,7 +18,6 @@ CLEAN_DATA_DIR = PROJECT_ROOT / "data" / "clean"
 def setup_directories():
     CLEAN_DATA_DIR.mkdir(parents=True, exist_ok=True)
 
-
 # ============================================================
 # CUSTOMERS
 # ============================================================
@@ -51,7 +50,6 @@ def clean_customers(df):
     df.loc[mask, "validation_reason"] = "missing_customer_id"
 
     return df
-
 
 # ============================================================
 # PRODUCTS
