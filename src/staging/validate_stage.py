@@ -1,7 +1,6 @@
-import json
 import os
+import json
 
-import pandas as pd
 import psycopg2
 from psycopg2.extras import execute_values
 
@@ -17,87 +16,79 @@ DB_CONFIG = {
 BATCH_SIZE = 1000
 
 
-TABLE_CONFIG = {
-    "customers": {
-        "raw_table": "raw.customers",
-        "staging_table": "staging.stg_customers",
-        "key_column": "customer_id",
-        "columns": [
-            "raw_record_id",
-            "customer_id",
-            "first_name",
-            "last_name",
-            "email",
-            "phone",
-            "address",
-            "city",
-            "country",
-            "segment",
-            "birthdate",
-            "created_at",
-            "updated_at",
-            "source_system",
-            "is_valid",
-            "validation_reason",
-        ],
-    },
-    "products": {
-        "raw_table": "raw.products",
-        "staging_table": "staging.stg_products",
-        "key_column": "product_id",
-        "columns": [
-            "raw_record_id",
-            "product_id",
-            "product_name",
-            "category",
-            "price",
-            "currency",
-            "stock_quantity",
-            "supplier",
-            "created_at",
-            "updated_at",
-            "is_valid",
-            "validation_reason",
-        ],
-    },
-    "orders": {
-        "raw_table": "raw.orders",
-        "staging_table": "staging.stg_orders",
-        "key_column": "order_id",
-        "columns": [
-            "raw_record_id",
-            "order_id",
-            "customer_id",
-            "order_date",
-            "status",
-            "payment_method",
-            "updated_at",
-            "is_valid",
-            "validation_reason",
-        ],
-    },
-    "order_items": {
-        "raw_table": "raw.order_items",
-        "staging_table": "staging.stg_order_items",
-        "key_column": "order_item_id",
-        "columns": [
-            "raw_record_id",
-            "order_item_id",
-            "order_id",
-            "product_id",
-            "quantity",
-            "unit_price",
-            "discount_pct",
-            "is_valid",
-            "validation_reason",
-        ],
-    },
-}
-
+# ============================================================
+# DATABASE CONNECTION
+# ============================================================
 
 def get_connection():
     return psycopg2.connect(**DB_CONFIG)
 
+
+# ============================================================
+# NORMALIZATION HELPERS
+# ============================================================
+
+def normalize_text(value):
+    """
+    Trim whitespace.
+
+    Empty strings become NULL.
+    Existing NULL values remain NULL.
+    """
+
+    if value is None:
+        return None
+
+    value = str(value).strip()
+
+    if value == "":
+        return None
+
+    return value
+
+
+def normalize_lower(value):
+    """
+    Trim text and convert it to lowercase.
+    """
+
+    value = normalize_text(value)
+
+    if value is None:
+        return None
+
+    return value.lower()
+
+
+def normalize_upper(value):
+    """
+    Trim text and convert it to uppercase.
+    """
+
+    value = normalize_text(value)
+
+    if value is None:
+        return None
+
+    return value.upper()
+
+
+# ============================================================
+# VALIDATION HELPER
+# ============================================================
+
+def add_reason(reasons, reason):
+    """
+    Add a validation reason without creating duplicates.
+    """
+
+    if reason not in reasons:
+        reasons.append(reason)
+
+
+# ============================================================
+# PIPELINE AUDIT
+# ============================================================
 
 def create_pipeline_run(cursor):
     cursor.execute(
@@ -144,449 +135,1066 @@ def finish_pipeline_run(
     )
 
 
-def clean_value(value):
+# ============================================================
+# CLEAR STAGING
+# ============================================================
+
+def clear_previous_staging(cursor):
     """
-    Convert pandas NULL/Timestamp values into PostgreSQL-compatible values.
-    """
-    if pd.isna(value):
-        return None
+    STAGING is rebuilt from RAW.
 
-    if isinstance(value, pd.Timestamp):
-        return value.to_pydatetime()
-
-    return value
-
-
-def normalize_text(value):
-    """
-    Normalize text values without filling NULLs.
-    """
-    if value is None:
-        return None
-
-    if pd.isna(value):
-        return None
-
-    return str(value).strip()
-
-
-def add_reason(reasons, message):
-    """
-    Add a validation reason without overwriting previous reasons.
-    """
-    if message not in reasons:
-        reasons.append(message)
-
-
-def validate_customers(df):
-    """
-    Normalize and validate customer records.
+    RAW is never modified.
     """
 
-    df = df.copy()
-
-    reasons = [[] for _ in range(len(df))]
-
-    # Normalize source_system.
-    df["source_system"] = df["source_system"].apply(normalize_text)
-
-    df["source_system"] = df["source_system"].replace(
-        {
-            "crm": "CRM",
-            "CRM": "CRM",
-        }
+    cursor.execute(
+        """
+        TRUNCATE TABLE
+            staging.stg_order_items,
+            staging.stg_orders,
+            staging.stg_products,
+            staging.stg_customers
+        RESTART IDENTITY;
+        """
     )
 
-    # Normalize segment.
-    df["segment"] = df["segment"].apply(
-        lambda value: (
-            normalize_text(value).lower()
-            if normalize_text(value) is not None
-            else None
-        )
+
+# ============================================================
+# REFERENCE DATA
+# ============================================================
+
+def get_reference_ids(cursor):
+
+    cursor.execute(
+        """
+        SELECT DISTINCT customer_id
+        FROM raw.customers
+        WHERE customer_id IS NOT NULL;
+        """
     )
 
-    # Required customer_id.
-    for index, value in df["customer_id"].items():
-        if clean_value(value) is None:
-            add_reason(reasons[index], "missing customer_id")
+    customer_ids = {
+        row[0]
+        for row in cursor.fetchall()
+    }
 
-    df["is_valid"] = [
-        len(reason_list) == 0
-        for reason_list in reasons
-    ]
-
-    df["validation_reason"] = [
-        "; ".join(reason_list)
-        if reason_list
-        else None
-        for reason_list in reasons
-    ]
-
-    return df
-
-
-def validate_products(df):
-    """
-    Normalize and validate product records.
-    """
-
-    df = df.copy()
-
-    reasons = [[] for _ in range(len(df))]
-
-    # Normalize category.
-    df["category"] = df["category"].apply(
-        lambda value: (
-            normalize_text(value).lower()
-            if normalize_text(value) is not None
-            else None
-        )
+    cursor.execute(
+        """
+        SELECT DISTINCT product_id
+        FROM raw.products
+        WHERE product_id IS NOT NULL;
+        """
     )
 
-    # Normalize currency.
-    df["currency"] = df["currency"].apply(
-        lambda value: (
-            normalize_text(value).upper()
-            if normalize_text(value) is not None
-            else None
-        )
+    product_ids = {
+        row[0]
+        for row in cursor.fetchall()
+    }
+
+    cursor.execute(
+        """
+        SELECT DISTINCT order_id
+        FROM raw.orders
+        WHERE order_id IS NOT NULL;
+        """
     )
 
-    # Required product_id.
-    for index, value in df["product_id"].items():
-        if clean_value(value) is None:
-            add_reason(reasons[index], "missing product_id")
+    order_ids = {
+        row[0]
+        for row in cursor.fetchall()
+    }
 
-    # Invalid price.
-    for index, value in df["price"].items():
-        value = clean_value(value)
-
-        if value is not None and value < 0:
-            add_reason(reasons[index], "negative price")
-
-    # Invalid stock quantity.
-    for index, value in df["stock_quantity"].items():
-        value = clean_value(value)
-
-        if value is not None and value < 0:
-            add_reason(reasons[index], "negative stock_quantity")
-
-    df["is_valid"] = [
-        len(reason_list) == 0
-        for reason_list in reasons
-    ]
-
-    df["validation_reason"] = [
-        "; ".join(reason_list)
-        if reason_list
-        else None
-        for reason_list in reasons
-    ]
-
-    return df
+    return customer_ids, product_ids, order_ids
 
 
-def validate_orders(df, valid_customer_ids):
-    """
-    Normalize and validate order records.
-    """
+# ============================================================
+# CUSTOMERS
+# ============================================================
 
-    df = df.copy()
+def load_customers(cursor, run_id):
 
-    reasons = [[] for _ in range(len(df))]
-
-    # Normalize status.
-    df["status"] = df["status"].apply(
-        lambda value: (
-            normalize_text(value).lower()
-            if normalize_text(value) is not None
-            else "unknown"
-        )
+    cursor.execute(
+        """
+        SELECT
+            raw_record_id,
+            customer_id,
+            first_name,
+            last_name,
+            email,
+            phone,
+            address,
+            city,
+            country,
+            segment,
+            birthdate,
+            created_at,
+            updated_at,
+            source_system
+        FROM raw.customers
+        ORDER BY raw_record_id;
+        """
     )
-
-    # Normalize payment method.
-    df["payment_method"] = df["payment_method"].apply(
-        lambda value: (
-            normalize_text(value).lower()
-            if normalize_text(value) is not None
-            else None
-        )
-    )
-
-    # Required order_id.
-    for index, value in df["order_id"].items():
-        if clean_value(value) is None:
-            add_reason(reasons[index], "missing order_id")
-
-    # Broken customer reference.
-    for index, value in df["customer_id"].items():
-        value = clean_value(value)
-
-        if value is not None and value not in valid_customer_ids:
-            add_reason(reasons[index], "unknown customer_id")
-
-    df["is_valid"] = [
-        len(reason_list) == 0
-        for reason_list in reasons
-    ]
-
-    df["validation_reason"] = [
-        "; ".join(reason_list)
-        if reason_list
-        else None
-        for reason_list in reasons
-    ]
-
-    return df
-
-
-def validate_order_items(
-    df,
-    valid_order_ids,
-    valid_product_ids,
-):
-    """
-    Normalize and validate order item records.
-    """
-
-    df = df.copy()
-
-    reasons = [[] for _ in range(len(df))]
-
-    # Required order_item_id.
-    for index, value in df["order_item_id"].items():
-        if clean_value(value) is None:
-            add_reason(reasons[index], "missing order_item_id")
-
-    # Quantity is required.
-    for index, value in df["quantity"].items():
-        value = clean_value(value)
-
-        if value is None:
-            add_reason(reasons[index], "missing quantity")
-        elif value <= 0:
-            add_reason(reasons[index], "non-positive quantity")
-
-    # Unit price cannot be negative.
-    for index, value in df["unit_price"].items():
-        value = clean_value(value)
-
-        if value is not None and value < 0:
-            add_reason(reasons[index], "negative unit_price")
-
-    # NULL discount_pct is allowed.
-    for index, value in df["discount_pct"].items():
-        value = clean_value(value)
-
-        if value is not None and not 0 <= value <= 100:
-            add_reason(
-                reasons[index],
-                "discount_pct outside 0-100 range",
-            )
-
-    # Broken order reference.
-    for index, value in df["order_id"].items():
-        value = clean_value(value)
-
-        if value is not None and value not in valid_order_ids:
-            add_reason(reasons[index], "unknown order_id")
-
-    # Broken product reference.
-    for index, value in df["product_id"].items():
-        value = clean_value(value)
-
-        if value is not None and value not in valid_product_ids:
-            add_reason(reasons[index], "unknown product_id")
-
-    df["is_valid"] = [
-        len(reason_list) == 0
-        for reason_list in reasons
-    ]
-
-    df["validation_reason"] = [
-        "; ".join(reason_list)
-        if reason_list
-        else None
-        for reason_list in reasons
-    ]
-
-    return df
-
-
-def get_raw_data(cursor, raw_table):
-    """
-    Read the RAW PostgreSQL table into a DataFrame.
-    """
-
-    cursor.execute(f"SELECT * FROM {raw_table};")
 
     rows = cursor.fetchall()
-    column_names = [desc[0] for desc in cursor.description]
 
-    return pd.DataFrame(rows, columns=column_names)
-
-
-def get_valid_reference_ids(cursor, table_name, key_column):
-    """
-    Get non-null IDs from a RAW table for referential validation.
-    """
-
-    cursor.execute(
-        f"""
-        SELECT DISTINCT {key_column}
-        FROM {table_name}
-        WHERE {key_column} IS NOT NULL;
-        """
-    )
-
-    return {
-        row[0]
-        for row in cursor.fetchall()
-    }
-
-
-def get_existing_staging_ids(cursor, staging_table):
-    """
-    Get RAW record IDs that have already been staged.
-
-    This makes the staging step idempotent.
-    """
-
-    cursor.execute(
-        f"""
-        SELECT raw_record_id
-        FROM {staging_table}
-        WHERE raw_record_id IS NOT NULL;
-        """
-    )
-
-    return {
-        row[0]
-        for row in cursor.fetchall()
-    }
-
-
-def insert_valid_records(cursor, staging_table, columns, df):
-    """
-    Insert valid records into the staging table in batches.
-    """
-
-    if df.empty:
-        return
-
-    column_list = ", ".join(columns)
-
-    insert_query = f"""
-        INSERT INTO {staging_table} (
-            {column_list}
-        )
-        VALUES %s;
-    """
-
-    values = []
-
-    for _, row in df.iterrows():
-        values.append(
-            tuple(
-                clean_value(row[column])
-                for column in columns
-            )
-        )
-
-    for start in range(0, len(values), BATCH_SIZE):
-        batch = values[start:start + BATCH_SIZE]
-
-        execute_values(
-            cursor,
-            insert_query,
-            batch,
-            page_size=BATCH_SIZE,
-        )
-
-
-def insert_rejected_records(
-    cursor,
-    run_id,
-    raw_table,
-    key_column,
-    df,
-):
-    """
-    Store invalid records in audit.rejected_records.
-    """
-
-    if df.empty:
-        return
-
+    seen = set()
+    staging_values = []
     rejected_values = []
 
-    for _, row in df.iterrows():
+    for row in rows:
 
-        record_key = clean_value(row.get(key_column))
+        (
+            raw_record_id,
+            customer_id,
+            first_name,
+            last_name,
+            email,
+            phone,
+            address,
+            city,
+            country,
+            segment,
+            birthdate,
+            created_at,
+            updated_at,
+            source_system,
+        ) = row
 
-        record_data = {
-            column: clean_value(row[column])
-            for column in row.index
-        }
+        # ----------------------------------------------------
+        # FULL DUPLICATE REMOVAL
+        # ----------------------------------------------------
 
-        rejected_values.append(
+        duplicate_key = (
+            customer_id,
+            first_name,
+            last_name,
+            email,
+            phone,
+            address,
+            city,
+            country,
+            segment,
+            birthdate,
+            created_at,
+            updated_at,
+            source_system,
+        )
+
+        if duplicate_key in seen:
+            continue
+
+        seen.add(duplicate_key)
+
+        # ----------------------------------------------------
+        # NORMALIZATION
+        # ----------------------------------------------------
+
+        customer_id = normalize_text(customer_id)
+        segment = normalize_lower(segment)
+        source_system = normalize_upper(source_system)
+
+        # ----------------------------------------------------
+        # VALIDATION
+        # ----------------------------------------------------
+
+        reasons = []
+
+        if customer_id is None:
+            add_reason(
+                reasons,
+                "missing customer_id",
+            )
+
+        is_valid = len(reasons) == 0
+
+        validation_reason = (
+            "; ".join(reasons)
+            if reasons
+            else None
+        )
+
+        staging_values.append(
             (
-                run_id,
-                raw_table,
-                str(record_key) if record_key is not None else None,
-                str(
-                    row.get(
-                        "validation_reason",
-                        "validation failed",
-                    )
-                ),
-                json.dumps(
-                    record_data,
-                    default=str,
-                ),
+                raw_record_id,
+                customer_id,
+                first_name,
+                last_name,
+                email,
+                phone,
+                address,
+                city,
+                country,
+                segment,
+                birthdate,
+                created_at,
+                updated_at,
+                source_system,
+                is_valid,
+                validation_reason,
             )
         )
 
-    rejected_query = """
-        INSERT INTO audit.rejected_records (
-            run_id,
-            source_table,
-            record_key,
-            reason,
-            record_data
-        )
-        VALUES %s;
-    """
+        # ----------------------------------------------------
+        # REJECTION AUDIT
+        # ----------------------------------------------------
 
-    for start in range(
-        0,
-        len(rejected_values),
-        BATCH_SIZE,
-    ):
-        batch = rejected_values[
-            start:start + BATCH_SIZE
-        ]
+        if not is_valid:
+
+            rejected_values.append(
+                (
+                    run_id,
+                    "raw.customers",
+                    customer_id,
+                    validation_reason,
+                    json.dumps(
+                        {
+                            "raw_record_id": raw_record_id,
+                            "customer_id": customer_id,
+                            "first_name": first_name,
+                            "last_name": last_name,
+                            "email": email,
+                            "phone": phone,
+                            "address": address,
+                            "city": city,
+                            "country": country,
+                            "segment": segment,
+                            "birthdate": str(birthdate)
+                            if birthdate is not None
+                            else None,
+                            "created_at": str(created_at)
+                            if created_at is not None
+                            else None,
+                            "updated_at": str(updated_at)
+                            if updated_at is not None
+                            else None,
+                            "source_system": source_system,
+                        },
+                        default=str,
+                    ),
+                )
+            )
+
+    # --------------------------------------------------------
+    # INSERT STAGING
+    # --------------------------------------------------------
+
+    if staging_values:
 
         execute_values(
             cursor,
-            rejected_query,
-            batch,
+            """
+            INSERT INTO staging.stg_customers (
+                raw_record_id,
+                customer_id,
+                first_name,
+                last_name,
+                email,
+                phone,
+                address,
+                city,
+                country,
+                segment,
+                birthdate,
+                created_at,
+                updated_at,
+                source_system,
+                is_valid,
+                validation_reason
+            )
+            VALUES %s;
+            """,
+            staging_values,
             page_size=BATCH_SIZE,
         )
 
+    # --------------------------------------------------------
+    # INSERT REJECTS
+    # --------------------------------------------------------
 
-def record_dq_result(
+    if rejected_values:
+
+        execute_values(
+            cursor,
+            """
+            INSERT INTO audit.rejected_records (
+                run_id,
+                source_table,
+                record_key,
+                reason,
+                record_data
+            )
+            VALUES %s;
+            """,
+            rejected_values,
+            page_size=BATCH_SIZE,
+        )
+
+    return len(staging_values), len(rejected_values)
+
+
+# ============================================================
+# PRODUCTS
+# ============================================================
+
+def load_products(cursor, run_id):
+
+    cursor.execute(
+        """
+        SELECT
+            raw_record_id,
+            product_id,
+            product_name,
+            category,
+            price,
+            currency,
+            stock_quantity,
+            supplier,
+            created_at,
+            updated_at
+        FROM raw.products
+        ORDER BY raw_record_id;
+        """
+    )
+
+    rows = cursor.fetchall()
+
+    seen = set()
+    staging_values = []
+    rejected_values = []
+
+    for row in rows:
+
+        (
+            raw_record_id,
+            product_id,
+            product_name,
+            category,
+            price,
+            currency,
+            stock_quantity,
+            supplier,
+            created_at,
+            updated_at,
+        ) = row
+
+        # ----------------------------------------------------
+        # FULL DUPLICATE REMOVAL
+        # ----------------------------------------------------
+
+        duplicate_key = (
+            product_id,
+            product_name,
+            category,
+            price,
+            currency,
+            stock_quantity,
+            supplier,
+            created_at,
+            updated_at,
+        )
+
+        if duplicate_key in seen:
+            continue
+
+        seen.add(duplicate_key)
+
+        # ----------------------------------------------------
+        # NORMALIZATION
+        # ----------------------------------------------------
+
+        product_id = normalize_text(product_id)
+        category = normalize_lower(category)
+        currency = normalize_upper(currency)
+        supplier = normalize_text(supplier)
+
+        # ----------------------------------------------------
+        # VALIDATION
+        # ----------------------------------------------------
+
+        reasons = []
+
+        if product_id is None:
+            add_reason(
+                reasons,
+                "missing product_id",
+            )
+
+        if price is None:
+            add_reason(
+                reasons,
+                "missing price",
+            )
+        elif price < 0:
+            add_reason(
+                reasons,
+                "negative price",
+            )
+
+        if stock_quantity is None:
+            add_reason(
+                reasons,
+                "missing stock_quantity",
+            )
+        elif stock_quantity < 0:
+            add_reason(
+                reasons,
+                "negative stock_quantity",
+            )
+
+        is_valid = len(reasons) == 0
+
+        validation_reason = (
+            "; ".join(reasons)
+            if reasons
+            else None
+        )
+
+        # ----------------------------------------------------
+        # KEEP INVALID VALUE
+        # ----------------------------------------------------
+
+        staging_values.append(
+            (
+                raw_record_id,
+                product_id,
+                product_name,
+                category,
+                price,
+                currency,
+                stock_quantity,
+                supplier,
+                created_at,
+                updated_at,
+                is_valid,
+                validation_reason,
+            )
+        )
+
+        # ----------------------------------------------------
+        # REJECTION AUDIT
+        # ----------------------------------------------------
+
+        if not is_valid:
+
+            rejected_values.append(
+                (
+                    run_id,
+                    "raw.products",
+                    product_id,
+                    validation_reason,
+                    json.dumps(
+                        {
+                            "raw_record_id": raw_record_id,
+                            "product_id": product_id,
+                            "product_name": product_name,
+                            "category": category,
+                            "price": str(price)
+                            if price is not None
+                            else None,
+                            "currency": currency,
+                            "stock_quantity": (
+                                str(stock_quantity)
+                                if stock_quantity is not None
+                                else None
+                            ),
+                            "supplier": supplier,
+                            "created_at": str(created_at)
+                            if created_at is not None
+                            else None,
+                            "updated_at": str(updated_at)
+                            if updated_at is not None
+                            else None,
+                        },
+                        default=str,
+                    ),
+                )
+            )
+
+    # --------------------------------------------------------
+    # INSERT STAGING
+    # --------------------------------------------------------
+
+    if staging_values:
+
+        execute_values(
+            cursor,
+            """
+            INSERT INTO staging.stg_products (
+                raw_record_id,
+                product_id,
+                product_name,
+                category,
+                price,
+                currency,
+                stock_quantity,
+                supplier,
+                created_at,
+                updated_at,
+                is_valid,
+                validation_reason
+            )
+            VALUES %s;
+            """,
+            staging_values,
+            page_size=BATCH_SIZE,
+        )
+
+    # --------------------------------------------------------
+    # INSERT REJECTS
+    # --------------------------------------------------------
+
+    if rejected_values:
+
+        execute_values(
+            cursor,
+            """
+            INSERT INTO audit.rejected_records (
+                run_id,
+                source_table,
+                record_key,
+                reason,
+                record_data
+            )
+            VALUES %s;
+            """,
+            rejected_values,
+            page_size=BATCH_SIZE,
+        )
+
+    return len(staging_values), len(rejected_values)
+
+
+# ============================================================
+# ORDERS
+# ============================================================
+
+def load_orders(cursor, run_id, customer_ids):
+
+    cursor.execute(
+        """
+        SELECT
+            raw_record_id,
+            order_id,
+            customer_id,
+            order_date,
+            status,
+            payment_method,
+            updated_at
+        FROM raw.orders
+        ORDER BY raw_record_id;
+        """
+    )
+
+    rows = cursor.fetchall()
+
+    seen = set()
+    staging_values = []
+    rejected_values = []
+
+    for row in rows:
+
+        (
+            raw_record_id,
+            order_id,
+            customer_id,
+            order_date,
+            status,
+            payment_method,
+            updated_at,
+        ) = row
+
+        # ----------------------------------------------------
+        # FULL DUPLICATE REMOVAL
+        # ----------------------------------------------------
+
+        duplicate_key = (
+            order_id,
+            customer_id,
+            order_date,
+            status,
+            payment_method,
+            updated_at,
+        )
+
+        if duplicate_key in seen:
+            continue
+
+        seen.add(duplicate_key)
+
+        # ----------------------------------------------------
+        # NORMALIZATION
+        # ----------------------------------------------------
+
+        order_id = normalize_text(order_id)
+        customer_id = normalize_text(customer_id)
+
+        status = normalize_lower(status)
+        payment_method = normalize_lower(payment_method)
+
+        # NULL STATUS IS ALLOWED AND BECOMES UNKNOWN
+        if status is None:
+            status = "unknown"
+
+        # ----------------------------------------------------
+        # VALIDATION
+        # ----------------------------------------------------
+
+        reasons = []
+
+        if order_id is None:
+            add_reason(
+                reasons,
+                "missing order_id",
+            )
+
+        if customer_id is None:
+            add_reason(
+                reasons,
+                "missing customer_id",
+            )
+        elif customer_id not in customer_ids:
+            add_reason(
+                reasons,
+                "unknown customer_id",
+            )
+
+        is_valid = len(reasons) == 0
+
+        validation_reason = (
+            "; ".join(reasons)
+            if reasons
+            else None
+        )
+
+        staging_values.append(
+            (
+                raw_record_id,
+                order_id,
+                customer_id,
+                order_date,
+                status,
+                payment_method,
+                updated_at,
+                None,
+                is_valid,
+                validation_reason,
+            )
+        )
+
+        # ----------------------------------------------------
+        # REJECTION AUDIT
+        # ----------------------------------------------------
+
+        if not is_valid:
+
+            rejected_values.append(
+                (
+                    run_id,
+                    "raw.orders",
+                    order_id,
+                    validation_reason,
+                    json.dumps(
+                        {
+                            "raw_record_id": raw_record_id,
+                            "order_id": order_id,
+                            "customer_id": customer_id,
+                            "order_date": str(order_date)
+                            if order_date is not None
+                            else None,
+                            "status": status,
+                            "payment_method": payment_method,
+                            "updated_at": str(updated_at)
+                            if updated_at is not None
+                            else None,
+                        },
+                        default=str,
+                    ),
+                )
+            )
+
+    # --------------------------------------------------------
+    # INSERT STAGING
+    # --------------------------------------------------------
+
+    if staging_values:
+
+        execute_values(
+            cursor,
+            """
+            INSERT INTO staging.stg_orders (
+                raw_record_id,
+                order_id,
+                customer_id,
+                order_date,
+                status,
+                payment_method,
+                updated_at,
+                total_amount,
+                is_valid,
+                validation_reason
+            )
+            VALUES %s;
+            """,
+            staging_values,
+            page_size=BATCH_SIZE,
+        )
+
+    # --------------------------------------------------------
+    # INSERT REJECTS
+    # --------------------------------------------------------
+
+    if rejected_values:
+
+        execute_values(
+            cursor,
+            """
+            INSERT INTO audit.rejected_records (
+                run_id,
+                source_table,
+                record_key,
+                reason,
+                record_data
+            )
+            VALUES %s;
+            """,
+            rejected_values,
+            page_size=BATCH_SIZE,
+        )
+
+    return len(staging_values), len(rejected_values)
+
+
+# ============================================================
+# ORDER ITEMS
+# ============================================================
+
+def load_order_items(
+    cursor,
+    run_id,
+    order_ids,
+    product_ids,
+):
+
+    cursor.execute(
+        """
+        SELECT
+            raw_record_id,
+            order_item_id,
+            order_id,
+            product_id,
+            quantity,
+            unit_price,
+            discount_pct
+        FROM raw.order_items
+        ORDER BY raw_record_id;
+        """
+    )
+
+    rows = cursor.fetchall()
+
+    seen = set()
+    staging_values = []
+    rejected_values = []
+
+    for row in rows:
+
+        (
+            raw_record_id,
+            order_item_id,
+            order_id,
+            product_id,
+            quantity,
+            unit_price,
+            discount_pct,
+        ) = row
+
+        # ----------------------------------------------------
+        # FULL DUPLICATE REMOVAL
+        # ----------------------------------------------------
+
+        duplicate_key = (
+            order_item_id,
+            order_id,
+            product_id,
+            quantity,
+            unit_price,
+            discount_pct,
+        )
+
+        if duplicate_key in seen:
+            continue
+
+        seen.add(duplicate_key)
+
+        # ----------------------------------------------------
+        # NORMALIZATION
+        # ----------------------------------------------------
+
+        order_item_id = normalize_text(order_item_id)
+        order_id = normalize_text(order_id)
+        product_id = normalize_text(product_id)
+
+        # ----------------------------------------------------
+        # VALIDATION
+        # ----------------------------------------------------
+
+        reasons = []
+
+        if order_item_id is None:
+            add_reason(
+                reasons,
+                "missing order_item_id",
+            )
+
+        if order_id is None:
+            add_reason(
+                reasons,
+                "missing order_id",
+            )
+        elif order_id not in order_ids:
+            add_reason(
+                reasons,
+                "unknown order_id",
+            )
+
+        if product_id is None:
+            add_reason(
+                reasons,
+                "missing product_id",
+            )
+        elif product_id not in product_ids:
+            add_reason(
+                reasons,
+                "unknown product_id",
+            )
+
+        # ----------------------------------------------------
+        # QUANTITY
+        # ----------------------------------------------------
+
+        if quantity is None:
+            add_reason(
+                reasons,
+                "missing quantity",
+            )
+        elif quantity <= 0:
+            add_reason(
+                reasons,
+                "quantity must be greater than zero",
+            )
+
+        # ----------------------------------------------------
+        # UNIT PRICE
+        # ----------------------------------------------------
+
+        if unit_price is None:
+            add_reason(
+                reasons,
+                "missing unit_price",
+            )
+        elif unit_price < 0:
+            add_reason(
+                reasons,
+                "negative unit_price",
+            )
+
+        # ----------------------------------------------------
+        # DISCOUNT
+        # ----------------------------------------------------
+
+        # NULL discount is VALID.
+        # It means the discount was not provided.
+
+        if discount_pct is not None:
+
+            if discount_pct < 0:
+                add_reason(
+                    reasons,
+                    "negative discount_pct",
+                )
+
+            elif discount_pct > 100:
+                add_reason(
+                    reasons,
+                    "discount_pct greater than 100",
+                )
+
+        is_valid = len(reasons) == 0
+
+        validation_reason = (
+            "; ".join(reasons)
+            if reasons
+            else None
+        )
+
+        # ----------------------------------------------------
+        # KEEP ORIGINAL VALUES
+        # ----------------------------------------------------
+
+        staging_values.append(
+            (
+                raw_record_id,
+                order_item_id,
+                order_id,
+                product_id,
+                quantity,
+                unit_price,
+                discount_pct,
+                is_valid,
+                validation_reason,
+            )
+        )
+
+        # ----------------------------------------------------
+        # REJECTION AUDIT
+        # ----------------------------------------------------
+
+        if not is_valid:
+
+            rejected_values.append(
+                (
+                    run_id,
+                    "raw.order_items",
+                    order_item_id,
+                    validation_reason,
+                    json.dumps(
+                        {
+                            "raw_record_id": raw_record_id,
+                            "order_item_id": order_item_id,
+                            "order_id": order_id,
+                            "product_id": product_id,
+                            "quantity": (
+                                str(quantity)
+                                if quantity is not None
+                                else None
+                            ),
+                            "unit_price": (
+                                str(unit_price)
+                                if unit_price is not None
+                                else None
+                            ),
+                            "discount_pct": (
+                                str(discount_pct)
+                                if discount_pct is not None
+                                else None
+                            ),
+                        },
+                        default=str,
+                    ),
+                )
+            )
+
+    # --------------------------------------------------------
+    # INSERT STAGING
+    # --------------------------------------------------------
+
+    if staging_values:
+
+        execute_values(
+            cursor,
+            """
+            INSERT INTO staging.stg_order_items (
+                raw_record_id,
+                order_item_id,
+                order_id,
+                product_id,
+                quantity,
+                unit_price,
+                discount_pct,
+                is_valid,
+                validation_reason
+            )
+            VALUES %s;
+            """,
+            staging_values,
+            page_size=BATCH_SIZE,
+        )
+
+    # --------------------------------------------------------
+    # INSERT REJECTS
+    # --------------------------------------------------------
+
+    if rejected_values:
+
+        execute_values(
+            cursor,
+            """
+            INSERT INTO audit.rejected_records (
+                run_id,
+                source_table,
+                record_key,
+                reason,
+                record_data
+            )
+            VALUES %s;
+            """,
+            rejected_values,
+            page_size=BATCH_SIZE,
+        )
+
+    return len(staging_values), len(rejected_values)
+
+
+# ============================================================
+# CALCULATE ORDER TOTALS
+# ============================================================
+
+def calculate_order_totals(cursor):
+
+    """
+    Calculate total_amount from VALID order items.
+
+    Formula:
+
+        quantity * unit_price *
+        (1 - discount_pct / 100)
+
+    NULL discount_pct is treated as 0%
+    ONLY for this calculation.
+
+    The original discount_pct remains NULL.
+    """
+
+    cursor.execute(
+        """
+        UPDATE staging.stg_orders AS orders
+        SET total_amount = totals.total_amount
+        FROM (
+            SELECT
+                order_id,
+                ROUND(
+                    SUM(
+                        quantity
+                        * unit_price
+                        * (
+                            1
+                            - COALESCE(discount_pct, 0) / 100
+                        )
+                    ),
+                    2
+                ) AS total_amount
+            FROM staging.stg_order_items
+            WHERE is_valid = TRUE
+              AND order_id IS NOT NULL
+            GROUP BY order_id
+        ) AS totals
+        WHERE orders.order_id = totals.order_id;
+        """
+    )
+
+    return cursor.rowcount
+
+
+# ============================================================
+# DATA QUALITY AUDIT
+# ============================================================
+
+def insert_dq_results(
     cursor,
     run_id,
     table_name,
-    total_rows,
-    valid_rows,
-    invalid_rows,
+    records_checked,
+    records_failed,
 ):
-    """
-    Store overall validation statistics.
-    """
 
     cursor.execute(
         """
@@ -598,324 +1206,251 @@ def record_dq_result(
             records_passed,
             records_failed
         )
-        VALUES (%s, %s, %s, %s, %s, %s);
+        VALUES (
+            %s,
+            %s,
+            %s,
+            %s,
+            %s,
+            %s
+        );
         """,
         (
             run_id,
             table_name,
-            "overall_validation",
-            total_rows,
-            valid_rows,
-            invalid_rows,
+            "validation_and_cleaning",
+            records_checked,
+            records_checked - records_failed,
+            records_failed,
         ),
     )
 
 
-def process_table(
-    cursor,
-    run_id,
-    table_name,
-    config,
-    valid_customer_ids=None,
-    valid_order_ids=None,
-    valid_product_ids=None,
-):
-    """
-    Read RAW → validate/normalize → STAGING/AUDIT.
-    """
-
-    print()
-    print("=" * 70)
-    print(f"PROCESSING: {table_name}")
-    print("=" * 70)
-
-    raw_table = config["raw_table"]
-    staging_table = config["staging_table"]
-
-    # ------------------------------------------------------------
-    # 1. Read directly from PostgreSQL RAW.
-    # ------------------------------------------------------------
-
-    df = get_raw_data(cursor, raw_table)
-
-    source_total = len(df)
-
-    print(f"RAW rows             : {source_total:,}")
-
-    if source_total == 0:
-        print("No RAW records found.")
-
-        record_dq_result(
-            cursor,
-            run_id,
-            table_name,
-            0,
-            0,
-            0,
-        )
-
-        return 0, 0
-
-    # ------------------------------------------------------------
-    # 2. Remove records already processed by STAGING.
-    # ------------------------------------------------------------
-
-    existing_raw_ids = get_existing_staging_ids(
-        cursor,
-        staging_table,
-    )
-
-    if existing_raw_ids:
-        df = df[
-            ~df["raw_record_id"].isin(existing_raw_ids)
-        ].copy()
-
-    new_rows = len(df)
-
-    print(f"New RAW rows         : {new_rows:,}")
-
-    if new_rows == 0:
-        print("Nothing new to validate/stage.")
-
-        return 0, 0
-
-    # ------------------------------------------------------------
-    # 3. Validate and normalize.
-    # ------------------------------------------------------------
-
-    if table_name == "customers":
-
-        df = validate_customers(df)
-
-    elif table_name == "products":
-
-        df = validate_products(df)
-
-    elif table_name == "orders":
-
-        df = validate_orders(
-            df,
-            valid_customer_ids,
-        )
-
-    elif table_name == "order_items":
-
-        df = validate_order_items(
-            df,
-            valid_order_ids,
-            valid_product_ids,
-        )
-
-    else:
-        raise ValueError(
-            f"Unknown table: {table_name}"
-        )
-
-    # ------------------------------------------------------------
-    # 4. Split valid and invalid records.
-    # ------------------------------------------------------------
-
-    valid_df = df[
-        df["is_valid"].fillna(False)
-    ].copy()
-
-    invalid_df = df[
-        ~df["is_valid"].fillna(False)
-    ].copy()
-
-    valid_count = len(valid_df)
-    invalid_count = len(invalid_df)
-
-    print(f"Valid rows           : {valid_count:,}")
-    print(f"Invalid rows         : {invalid_count:,}")
-
-    # ------------------------------------------------------------
-    # 5. Insert valid records into STAGING.
-    # ------------------------------------------------------------
-
-    insert_valid_records(
-        cursor,
-        staging_table,
-        config["columns"],
-        valid_df,
-    )
-
-    # ------------------------------------------------------------
-    # 6. Store invalid records in audit.rejected_records.
-    # ------------------------------------------------------------
-
-    insert_rejected_records(
-        cursor,
-        run_id,
-        raw_table,
-        config["key_column"],
-        invalid_df,
-    )
-
-    # ------------------------------------------------------------
-    # 7. Store DQ statistics.
-    # ------------------------------------------------------------
-
-    record_dq_result(
-        cursor,
-        run_id,
-        table_name,
-        new_rows,
-        valid_count,
-        invalid_count,
-    )
-
-    print(f"Staged records       : {valid_count:,}")
-    print(f"Rejected records     : {invalid_count:,}")
-
-    return valid_count, invalid_count
-
+# ============================================================
+# MAIN
+# ============================================================
 
 def main():
-
-    print("=" * 70)
-    print("VALIDATE RAW → STAGING")
-    print("=" * 70)
 
     connection = get_connection()
     cursor = connection.cursor()
 
     run_id = None
 
-    total_staged = 0
-    total_rejected = 0
-
     try:
 
-        # --------------------------------------------------------
-        # Create pipeline run.
-        # --------------------------------------------------------
+        # ----------------------------------------------------
+        # START PIPELINE RUN
+        # ----------------------------------------------------
 
         run_id = create_pipeline_run(cursor)
 
-        print(f"Pipeline run ID      : {run_id}")
+        clear_previous_staging(cursor)
 
-        # --------------------------------------------------------
-        # Reference IDs.
-        #
-        # These are read from RAW, not from Parquet.
-        # --------------------------------------------------------
+        (
+            customer_ids,
+            product_ids,
+            order_ids,
+        ) = get_reference_ids(cursor)
 
-        valid_customer_ids = get_valid_reference_ids(
-            cursor,
-            "raw.customers",
-            "customer_id",
-        )
-
-        valid_product_ids = get_valid_reference_ids(
-            cursor,
-            "raw.products",
-            "product_id",
-        )
-
-        valid_order_ids = get_valid_reference_ids(
-            cursor,
-            "raw.orders",
-            "order_id",
-        )
-
+        print(f"Pipeline run ID: {run_id}")
         print(
             f"Customer reference IDs: "
-            f"{len(valid_customer_ids):,}"
+            f"{len(customer_ids):,}"
         )
-
         print(
-            f"Product reference IDs : "
-            f"{len(valid_product_ids):,}"
+            f"Product reference IDs: "
+            f"{len(product_ids):,}"
         )
-
         print(
-            f"Order reference IDs   : "
-            f"{len(valid_order_ids):,}"
+            f"Order reference IDs: "
+            f"{len(order_ids):,}"
         )
+        print()
 
-        # --------------------------------------------------------
-        # Process in dependency order.
-        # --------------------------------------------------------
+        # ----------------------------------------------------
+        # CUSTOMERS
+        # ----------------------------------------------------
 
-        for table_name in [
-            "customers",
-            "products",
-            "orders",
-            "order_items",
-        ]:
-
-            config = TABLE_CONFIG[table_name]
-
-            staged, rejected = process_table(
+        customers_processed, customers_failed = (
+            load_customers(
                 cursor,
                 run_id,
-                table_name,
-                config,
-                valid_customer_ids,
-                valid_order_ids,
-                valid_product_ids,
             )
+        )
 
-            total_staged += staged
-            total_rejected += rejected
+        print(
+            f"customers: "
+            f"{customers_processed - customers_failed:,} "
+            f"valid, "
+            f"{customers_failed:,} invalid"
+        )
 
-        # --------------------------------------------------------
-        # Mark pipeline successful.
-        # --------------------------------------------------------
+        insert_dq_results(
+            cursor,
+            run_id,
+            "customers",
+            customers_processed,
+            customers_failed,
+        )
+
+        # ----------------------------------------------------
+        # PRODUCTS
+        # ----------------------------------------------------
+
+        products_processed, products_failed = (
+            load_products(
+                cursor,
+                run_id,
+            )
+        )
+
+        print(
+            f"products: "
+            f"{products_processed - products_failed:,} "
+            f"valid, "
+            f"{products_failed:,} invalid"
+        )
+
+        insert_dq_results(
+            cursor,
+            run_id,
+            "products",
+            products_processed,
+            products_failed,
+        )
+
+        # ----------------------------------------------------
+        # ORDERS
+        # ----------------------------------------------------
+
+        orders_processed, orders_failed = (
+            load_orders(
+                cursor,
+                run_id,
+                customer_ids,
+            )
+        )
+
+        print(
+            f"orders: "
+            f"{orders_processed - orders_failed:,} "
+            f"valid, "
+            f"{orders_failed:,} invalid"
+        )
+
+        insert_dq_results(
+            cursor,
+            run_id,
+            "orders",
+            orders_processed,
+            orders_failed,
+        )
+
+        # ----------------------------------------------------
+        # ORDER ITEMS
+        # ----------------------------------------------------
+
+        order_items_processed, order_items_failed = (
+            load_order_items(
+                cursor,
+                run_id,
+                order_ids,
+                product_ids,
+            )
+        )
+
+        print(
+            f"order_items: "
+            f"{order_items_processed - order_items_failed:,} "
+            f"valid, "
+            f"{order_items_failed:,} invalid"
+        )
+
+        insert_dq_results(
+            cursor,
+            run_id,
+            "order_items",
+            order_items_processed,
+            order_items_failed,
+        )
+
+        # ----------------------------------------------------
+        # ORDER TOTALS
+        # ----------------------------------------------------
+
+        totals_updated = calculate_order_totals(cursor)
+
+        print()
+        print(
+            f"Order totals calculated for "
+            f"{totals_updated:,} orders"
+        )
+
+        # ----------------------------------------------------
+        # FINAL AUDIT
+        # ----------------------------------------------------
+
+        total_processed = (
+            customers_processed
+            + products_processed
+            + orders_processed
+            + order_items_processed
+        )
+
+        total_failed = (
+            customers_failed
+            + products_failed
+            + orders_failed
+            + order_items_failed
+        )
 
         finish_pipeline_run(
             cursor,
             run_id,
             "SUCCESS",
-            total_staged,
-            total_rejected,
+            total_processed,
+            total_failed,
         )
 
         connection.commit()
 
         print()
-        print("=" * 70)
-        print("VALIDATION + STAGING COMPLETED")
-        print("=" * 70)
-
+        print("=" * 60)
+        print("VALIDATION + CLEANING COMPLETED")
+        print("=" * 60)
         print(
-            f"Pipeline run ID      : {run_id}"
+            f"Total processed: {total_processed:,}"
+        )
+        print(
+            f"Total rejected:  {total_failed:,}"
+        )
+        print(
+            f"Run ID:          {run_id}"
         )
 
-        print(
-            f"Records staged       : "
-            f"{total_staged:,}"
-        )
-
-        print(
-            f"Records rejected     : "
-            f"{total_rejected:,}"
-        )
-
-    except Exception as error:
+    except Exception as e:
 
         connection.rollback()
 
-        print()
-        print("=" * 70)
-        print("VALIDATION + STAGING FAILED")
-        print("=" * 70)
-
-        print(str(error))
-
         if run_id is not None:
 
-            finish_pipeline_run(
-                cursor,
-                run_id,
-                "FAILED",
-                total_staged,
-                total_rejected,
-                str(error),
-            )
+            try:
 
-            connection.commit()
+                finish_pipeline_run(
+                    cursor,
+                    run_id,
+                    "FAILED",
+                    0,
+                    0,
+                    str(e),
+                )
+
+                connection.commit()
+
+            except Exception:
+
+                connection.rollback()
 
         raise
 
@@ -927,4 +1462,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

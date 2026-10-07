@@ -4,7 +4,7 @@ import os
 import pandas as pd
 import psycopg2
 from psycopg2.extras import execute_values
-
+from datetime import datetime
 
 # ============================================================
 # PROJECT PATHS
@@ -34,7 +34,7 @@ DB_CONFIG = {
 
 TABLE_CONFIG = {
 
-    "customers.parquet": {
+    "customers_with_history.parquet": {
         "table": "raw.customers",
 
         "columns": [
@@ -54,7 +54,7 @@ TABLE_CONFIG = {
         ],
     },
 
-    "products.parquet": {
+    "products_with_history.parquet": {
         "table": "raw.products",
 
         "columns": [
@@ -70,7 +70,7 @@ TABLE_CONFIG = {
         ],
     },
 
-    "orders.parquet": {
+    "orders_with_history.parquet": {
         "table": "raw.orders",
 
         "columns": [
@@ -83,7 +83,7 @@ TABLE_CONFIG = {
         ],
     },
 
-    "order_items.parquet": {
+    "orderItems_with_history.parquet": {
         "table": "raw.order_items",
 
         "columns": [
@@ -113,6 +113,37 @@ def convert_nulls(value):
         return None
 
     return value
+
+
+def parse_source_datetime(value):
+    if value is None:
+        return None
+
+    if pd.isna(value):
+        return None
+
+    if isinstance(value, datetime):
+        return value
+
+    text = str(value).strip()
+
+    formats = [
+        "%Y-%m-%dT%H:%M:%S",
+        "%Y-%m-%dT%H:%M:%S.%f",
+        "%Y-%m-%d",
+        "%d/%m/%Y",
+        "%m-%d-%Y",
+        "%d %b %Y",
+        "%d %B %Y",
+    ]
+
+    for fmt in formats:
+        try:
+            return datetime.strptime(text, fmt)
+        except ValueError:
+            pass
+
+    raise ValueError(f"Unable to parse source datetime: {text}")
 
 
 # ============================================================
