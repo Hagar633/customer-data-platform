@@ -197,9 +197,6 @@ The last container name applies to the current local setup; names may differ in 
 | Debezium UI | http://localhost:8086 |
 | Flink Dashboard | http://localhost:8081 |
 | pgAdmin | http://localhost:5050 |
-| HDFS NameNode UI, if enabled | http://localhost:9870 |
-| YARN ResourceManager UI, if enabled | http://localhost:8089 |
-| YARN History Server, if enabled | http://localhost:8188 |
 
 A URL being listed does not guarantee that the corresponding service is currently healthy; availability depends on the local container configuration.
 
@@ -341,25 +338,6 @@ To run the project locally:
 
 Flink connector JARs and Maven build outputs should be obtained or generated locally as required by the selected versions.
 
-## Development and Troubleshooting
-
-- Confirm PostgreSQL is healthy before running ingestion or validation scripts.
-- Confirm Kafka is reachable from the containers that use it.
-- Check Debezium connector and task status through the REST API.
-- Verify that Kafka topics receive events before troubleshooting downstream processing.
-- Check consumer offsets and group assignments when expected events are not processed.
-- Check staging records using their raw-record identifiers and timestamps when verifying a particular CDC event.
-- Avoid running batch scripts that truncate staging tables while the CDC validator is consuming events.
-- Verify Flink job status, topic names, consumer offsets, and JDBC settings before diagnosing business-layer results.
-- Keep credentials and local configuration out of version control.
-
-## Security
-
-- Never commit passwords, tokens, API keys, or private keys.
-- Do not commit database volumes, database dumps, or sensitive datasets.
-- Use environment variables or local untracked configuration files for secrets.
-- Use least-privilege database accounts in production.
-- Review configuration files before pushing changes to a public repository.
 
 ## Project Status
 
