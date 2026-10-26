@@ -56,7 +56,6 @@ def product_scd2_changed(previous, current):
         values_different(previous["category"], current["category"])
     )
 
-
 # ============================================================
 # CUSTOMER DIMENSION
 # ============================================================
@@ -619,10 +618,15 @@ def load_orders(cursor):
             SELECT customer_sk
             FROM business.dim_customer
             WHERE customer_id = %s
-              AND is_current = TRUE
+                            AND CASE
+                                        WHEN %s IS NULL THEN is_current
+                                        ELSE valid_from <= %s
+                                         AND (valid_to IS NULL OR valid_to > %s)
+                                    END
+                        ORDER BY valid_from DESC
             LIMIT 1
             """,
-            (customer_id,),
+                        (customer_id, order_date, order_date, order_date),
         )
 
         customer_result = cursor.fetchone()
@@ -727,13 +731,23 @@ def load_order_items(cursor):
         # Resolve current product surrogate key.
         cursor.execute(
             """
-            SELECT product_sk
-            FROM business.dim_product
-            WHERE product_id = %s
-              AND is_current = TRUE
+                        SELECT product.product_sk
+                        FROM business.dim_product AS product
+                        JOIN business.fact_order AS orders
+                            ON orders.order_sk = %s
+                        WHERE product.product_id = %s
+                            AND CASE
+                                        WHEN orders.order_date IS NULL THEN product.is_current
+                                        ELSE product.valid_from <= orders.order_date
+                                         AND (
+                                                 product.valid_to IS NULL
+                                                 OR product.valid_to > orders.order_date
+                                         )
+                                    END
+                        ORDER BY product.valid_from DESC
             LIMIT 1
             """,
-            (product_id,),
+                        (order_sk, product_id),
         )
 
         product_result = cursor.fetchone()

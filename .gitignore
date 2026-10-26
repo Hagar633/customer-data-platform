@@ -1,0 +1,38 @@
+# Python environments
+.venv/
+.venv-*/
+venv/
+env/
+
+# Python generated files
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Local datasets
+data/**/*.parquet
+data/**/*.csv
+data/**/*.json
+data/**/*.jsonl
+
+# Flink build artifacts and connector binaries
+flink/target/
+flink/lib/*.jar
+
+# Logs and temporary files
+*.log
+*.tmp
+*.bak
+
+# Editors and operating systems
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

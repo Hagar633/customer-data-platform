@@ -43,3 +43,4 @@ SELECT
         ELSE NULL
     END
 FROM raw.customers;
+

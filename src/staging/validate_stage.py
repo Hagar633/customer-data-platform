@@ -1017,6 +1017,8 @@ def load_order_items(
                     reasons,
                     "discount_pct greater than 100",
                 )
+        if discount_pct is None:
+                discount_pct = 0        
 
         is_valid = len(reasons) == 0
 

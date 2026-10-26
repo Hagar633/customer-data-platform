@@ -144,3 +144,8 @@ CREATE INDEX IF NOT EXISTS idx_fact_order_item_product_sk
 
 CREATE INDEX IF NOT EXISTS idx_fact_order_item_order_item_id
     ON business.fact_order_item(order_item_id);
+
+
+
+
+    

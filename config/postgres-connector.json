@@ -1,0 +1,19 @@
+{
+  "name": "customer-postgres-connector",
+  "config": {
+    "connector.class": "io.debezium.connector.postgresql.PostgresConnector",
+    "database.hostname": "postgres",
+    "database.port": "5432",
+    "database.user": "postgres",
+    "database.password": "postgres",
+    "database.dbname": "appdb",
+    "topic.prefix": "customer",
+    "plugin.name": "pgoutput",
+    "publication.autocreate.mode": "filtered",
+    "slot.name": "customer_cdc_slot",
+    "publication.name": "customer_cdc_publication",
+    "schema.include.list": "raw",
+    "table.include.list": "raw.customers,raw.products,raw.orders,raw.order_items",
+    "snapshot.mode": "initial"
+  }
+}
